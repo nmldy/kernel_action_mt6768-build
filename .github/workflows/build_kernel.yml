@@ -169,22 +169,22 @@ jobs:
             echo "HAVE_SOURCE_BOOT_IMAGE=true" >> $GITHUB_ENV
         fi
 
-    - name: Setup KernelSU (BakaSU v3.1.6 Direct Download)
+    - name: Setup KernelSU (Official v0.9.5)
       if: env.ENABLE_KERNELSU == 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
-        # 定义当前根目录变量（修复报错的关键）
+        # 定义当前根目录变量
         GKI_ROOT=$(pwd)
         
-        # 直接下载你提供的 v3.1.6 源码压缩包
-        echo "[+] Downloading BakaSU v3.1.6..."
-        wget -q https://github.com/Baka-SU/BakaSU/archive/refs/tags/v3.1.6.zip
+        # 直接下载官方 KernelSU v0.9.5 源码压缩包
+        echo "[+] Downloading Official KernelSU v0.9.5..."
+        wget -q https://github.com/tiann/KernelSU/archive/refs/tags/v0.9.5.zip
         
         # 解压并重命名为 KernelSU
         echo "[+] Extracting..."
-        unzip -q v3.1.6.zip
-        mv BakaSU-3.1.6 KernelSU
+        unzip -q v0.9.5.zip
+        mv KernelSU-0.9.5 KernelSU
         
         # 建立软链接并修改 Makefile/Kconfig
         DRIVER_DIR="drivers"
@@ -196,7 +196,7 @@ jobs:
         grep -q "kernelsu" "$DRIVER_DIR/Makefile" || printf "\nobj-\$(CONFIG_KSU) += kernelsu/\n" >> "$DRIVER_DIR/Makefile"
         grep -q "source \"drivers/kernelsu/Kconfig\"" "$DRIVER_DIR/Kconfig" || sed -i "/endmenu/i\source \"drivers/kernelsu/Kconfig\"" "$DRIVER_DIR/Kconfig"
         
-        KSU_VERSION="_v3.1.6"
+        KSU_VERSION="_v0.9.5"
         echo "UPLOADNAME=-KernelSU$KSU_VERSION" >> $GITHUB_ENV
         
         # 应用必要的兼容补丁
