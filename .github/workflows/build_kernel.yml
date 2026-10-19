@@ -9,6 +9,18 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    # 释放空间，防止跑到最后硬盘满了
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: true
+        android: false
+        dotnet: true
+        haskell: true
+        large-packages: true
+        docker-images: true
+        swap-storage: false
+
     - name: Set swap to 10G
       uses: pierotofy/set-swap-space@master
       with:
@@ -24,27 +36,23 @@ jobs:
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         mkdir clang
-        # 写死 Clang 链接
         wget -nv https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
         tar -C clang/ -zxvf clang-r450784e.tar.gz
 
-    - name: Download GCC (Stable LineageOS Mirror)
+    - name: Download GCC
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        # 写死 GCC 链接，彻底告别 wget 报错
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-64
         git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-32
 
     - name: Download kernel source
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        # 写死源码地址和分支
         git clone --recursive https://github.com/Jbub5/android_kernel_xiaomi_mt6768 -b kernel-tree android-kernel --depth=1
 
     - name: Setup Configuration for Kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        # 直接操作 merlin_defconfig，安全开启 KPROBES 和 KALLSYMS_ALL
         scripts/config --file arch/arm64/configs/merlin_defconfig \
           -e KPROBES \
           -e KALLSYMS_ALL \
@@ -60,11 +68,11 @@ jobs:
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
         
-        # 写死编译参数
         EXTRA_CMDS="LLVM=1 LLVM_IAS=1 LD=ld.lld AS=llvm-as AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CONFIG_NO_ERROR_ON_MISMATCH=y TARGET_BUILD_VARIANT=user"
         
-        make -j$(nproc --all) CC=clang O=out ARCH=arm64 $EXTRA_CMDS merlin_defconfig
-        make -j$(nproc --all) CC=clang O=out ARCH=arm64 $EXTRA_CMDS
+        make -j4 CC=clang O=out ARCH=arm64 $EXTRA_CMDS merlin_defconfig
+        # 把 -j$(nproc --all) 降级为 -j4，减少内存并发，这是防 Error 2 的绝招
+        make -j4 CC=clang O=out ARCH=arm64 $EXTRA_CMDS
 
     - name: Check a kernel output files
       run: |
@@ -80,7 +88,6 @@ jobs:
       if: env.CHECK_FILE_IS_OK == 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        # 写死打包器地址
         git clone https://github.com/Jbub5/AnyKernel3.git -b proton --depth=1 AnyKernel3
         cp android-kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
