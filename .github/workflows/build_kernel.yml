@@ -1,25 +1,13 @@
 name: Build Kernel
 on:
   workflow_dispatch:
-    inputs:
-      select_device:
-        description: 'Select device:'
-        required: true
-        type: choice
-        options:
-        - 'merlin'
 
 jobs:
   build:
     name: Build Kernel by ${{ github.actor }}
     runs-on: ubuntu-22.04
-    env:
-      DEVICE: ${{ github.event.inputs.select_device }}
     steps:
     - uses: actions/checkout@v4
-    - name: Prepare Environment
-      run: |
-        grep -v -E "^#|^\n" config.env | sed 's/ #.*//; s/#.*//' >> $GITHUB_ENV
 
     - name: Set swap to 10G
       uses: pierotofy/set-swap-space@master
@@ -29,39 +17,35 @@ jobs:
     - name: Setup kernel build environment
       run: |
         sudo apt-get update
-        sudo apt-get install git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
+        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     - name: Download AOSP Clang
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
         mkdir clang
-        wget -nv https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/${{ env.CLANG_BRANCH }}/clang-${{ env.CLANG_VERSION }}.tar.gz
-        tar -C clang/ -zxvf clang-${{ env.CLANG_VERSION }}.tar.gz
+        # 写死 Clang 链接
+        wget -nv https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+        tar -C clang/ -zxvf clang-r450784e.tar.gz
 
-    - name: Download Custom GCC
+    - name: Download GCC (Stable LineageOS Mirror)
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        wget -nv -O gcc-64.tar.xz ${{ env.CUSTOM_GCC_64_SOURCE }}
-        mkdir gcc-64
-        tar -C gcc-64/ -Jxvf gcc-64.tar.xz
-        mv -f gcc-64/*/* gcc-64/ || true
-        
-        wget -nv -O gcc-32.tar.xz ${{ env.CUSTOM_GCC_32_SOURCE }}
-        mkdir gcc-32
-        tar -C gcc-32/ -Jxvf gcc-32.tar.xz
-        mv -f gcc-32/*/* gcc-32/ || true
+        # 写死 GCC 链接，彻底告别 wget 报错
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9.git gcc-64
+        git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9.git gcc-32
 
     - name: Download kernel source
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone --recursive ${{ env.KERNEL_SOURCE }} -b ${{ env.KERNEL_SOURCE_BRANCH }} android-kernel --depth=1
+        # 写死源码地址和分支
+        git clone --recursive https://github.com/Jbub5/android_kernel_xiaomi_mt6768 -b kernel-tree android-kernel --depth=1
 
-    - name: Setup Configuration for Kernel (Safe Mode)
+    - name: Setup Configuration for Kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        # 使用 Linux 内核自带的 scripts/config 安全开启你需要的两个选项及依赖
-        scripts/config --file arch/arm64/configs/${DEVICE}_defconfig \
+        # 直接操作 merlin_defconfig，安全开启 KPROBES 和 KALLSYMS_ALL
+        scripts/config --file arch/arm64/configs/merlin_defconfig \
           -e KPROBES \
           -e KALLSYMS_ALL \
           -e KALLSYMS \
@@ -76,13 +60,16 @@ jobs:
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/clang/bin:$PATH
         
-        make -j$(nproc --all) CC=clang O=out ARCH=${{ env.KERNEL_ARCH }} ${{ env.EXTRA_CMDS }} ${DEVICE}_defconfig
-        make -j$(nproc --all) CC=clang O=out ARCH=${{ env.KERNEL_ARCH }} ${{ env.EXTRA_CMDS }}
+        # 写死编译参数
+        EXTRA_CMDS="LLVM=1 LLVM_IAS=1 LD=ld.lld AS=llvm-as AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump READELF=llvm-readelf STRIP=llvm-strip CROSS_COMPILE=aarch64-linux-gnu- CROSS_COMPILE_ARM32=arm-linux-gnueabi- CROSS_COMPILE_COMPAT=arm-linux-gnueabi- CONFIG_NO_ERROR_ON_MISMATCH=y TARGET_BUILD_VARIANT=user"
+        
+        make -j$(nproc --all) CC=clang O=out ARCH=arm64 $EXTRA_CMDS merlin_defconfig
+        make -j$(nproc --all) CC=clang O=out ARCH=arm64 $EXTRA_CMDS
 
     - name: Check a kernel output files
       run: |
        cd $GITHUB_WORKSPACE/kernel_workspace
-       if [ -f android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} ]; then
+       if [ -f android-kernel/out/arch/arm64/boot/Image.gz-dtb ]; then
            echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
        else
            echo "Kernel output file is empty"
@@ -93,13 +80,14 @@ jobs:
       if: env.CHECK_FILE_IS_OK == 'true'
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone ${{ env.CUSTOM_ANYKERNEL3_SOURCE }} -b ${{ env.CUSTOM_ANYKERNEL3_BRANCH }} --depth=1 AnyKernel3
-        cp android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }} AnyKernel3/
+        # 写死打包器地址
+        git clone https://github.com/Jbub5/AnyKernel3.git -b proton --depth=1 AnyKernel3
+        cp android-kernel/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
     - name: Upload AnyKernel3
       if: env.CHECK_FILE_IS_OK == 'true'
       uses: actions/upload-artifact@v4
       with:
-        name: AnyKernel3-${{ env.DEVICE }}
+        name: AnyKernel3-merlin
         path: kernel_workspace/AnyKernel3/*
