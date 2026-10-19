@@ -31,7 +31,6 @@ jobs:
         sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-    # 这次的杀手锏 1：完全放弃 Clang，使用纯正的 GCC 编译（这是 MTK 4.14 唯一稳妥的方案）
     - name: Download GCC Compilers
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
@@ -43,38 +42,36 @@ jobs:
         cd $GITHUB_WORKSPACE/kernel_workspace
         git clone --recursive https://github.com/Jbub5/android_kernel_xiaomi_mt6768 -b kernel-tree android-kernel --depth=1
 
-    - name: Setup Configuration for Kernel (Safe Mode)
-      run: |
-        cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
-        # 开启你需要的功能
-        scripts/config --file arch/arm64/configs/merlin_defconfig \
-          -e KPROBES \
-          -e KALLSYMS_ALL \
-          -e KALLSYMS \
-          -e KALLSYMS_BASE_RELATIVE \
-          -e MODULES \
-          -e DEBUG_KERNEL
-          
-        # 杀手锏 2：彻底关闭 LTO 和 WERROR 报错，防止最后阶段崩溃
-        scripts/config --file arch/arm64/configs/merlin_defconfig \
-          -d LTO \
-          -d LTO_CLANG \
-          -d THINLTO \
-          -e LTO_NONE \
-          -d CC_WERROR
-
     - name: Build kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
         
-        # 使用纯 GCC 编译环境
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc-64/bin:$PATH
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH
         export CROSS_COMPILE=aarch64-linux-android-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
         
-        # 为了防止 GitHub 内存不够爆掉，限制并发为 4
+        # 1. 先生成默认配置到 out 目录（此时绝不碰任何文件）
         make -j4 O=out ARCH=arm64 merlin_defconfig
+        
+        # 2. 直接修改 out 目录里生成的隐藏配置文件 .config，避开 MTK 检查
+        scripts/config --file out/.config \
+          -e KPROBES \
+          -e KALLSYMS_ALL \
+          -e KALLSYMS \
+          -e KALLSYMS_BASE_RELATIVE \
+          -e MODULES \
+          -e DEBUG_KERNEL \
+          -d LTO \
+          -d LTO_CLANG \
+          -d THINLTO \
+          -e LTO_NONE \
+          -d CC_WERROR
+          
+        # 3. 让系统自动梳理依赖关系，自动修复冲突（神仙操作）
+        make -j4 O=out ARCH=arm64 olddefconfig
+        
+        # 4. 开始正式编译
         make -j4 O=out ARCH=arm64
 
     - name: Check a kernel output files
