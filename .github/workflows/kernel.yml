@@ -28,7 +28,6 @@ jobs:
         source config.env
         set +a
 
-        # 透传到后续步骤
         echo "KERNEL_SOURCE=${KERNEL_SOURCE}" >> $GITHUB_ENV
         echo "KERNEL_SOURCE_BRANCH=${KERNEL_SOURCE_BRANCH}" >> $GITHUB_ENV
         echo "KERNEL_CONFIG=${KERNEL_CONFIG}" >> $GITHUB_ENV
@@ -38,9 +37,7 @@ jobs:
         echo "USE_CUSTOM_ANYKERNEL3=${USE_CUSTOM_ANYKERNEL3}" >> $GITHUB_ENV
         echo "CUSTOM_ANYKERNEL3_SOURCE=${CUSTOM_ANYKERNEL3_SOURCE}" >> $GITHUB_ENV
         echo "CUSTOM_ANYKERNEL3_BRANCH=${CUSTOM_ANYKERNEL3_BRANCH}" >> $GITHUB_ENV
-        echo "ADD_LOCALVERSION_TO_FILENAME=${ADD_LOCALVERSION_TO_FILENAME}" >> $GITHUB_ENV
 
-        # KSU：config.env 为准，允许 workflow_dispatch 手动覆盖
         if [ -n "${{ github.event.inputs.BUILD_KSU }}" ] && [ "${{ github.event.inputs.BUILD_KSU }}" = "true" ]; then
           echo "ENABLE_KERNELSU=true" >> $GITHUB_ENV
         else
@@ -79,11 +76,16 @@ jobs:
           git make
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
-    - name: Setup ccache
-      if: env.ENABLE_CCACHE == 'true'
-      uses: hendrikmuhs/ccache-action@v1.2
-      with:
-        key: kernel-${{ env.KERNEL_CONFIG }}
+    - name: Download AOSP Clang (r450784e)
+      run: |
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace/clang/clang-r450784e
+        cd $GITHUB_WORKSPACE/kernel_workspace/clang
+        wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
+        tar -xzf clang-r450784e.tar.gz -C clang-r450784e
+        rm -f clang-r450784e.tar.gz
+        # 加入 PATH，后续所有步骤都能用 clang / ld.lld
+        echo "$GITHUB_WORKSPACE/kernel_workspace/clang/clang-r450784e/bin" >> $GITHUB_PATH
+        $GITHUB_WORKSPACE/kernel_workspace/clang/clang-r450784e/bin/clang --version
 
     - name: Download kernel source
       run: |
@@ -100,7 +102,6 @@ jobs:
         cd $KERNEL_DIR
         DEFCONFIG=arch/arm64/configs/${KERNEL_CONFIG}
 
-        # ---- 开启 KPROBES / KALLSYMS_ALL（供 KernelSU 系使用）----
         if [ "${ADD_KPROBES_CONFIG}" = "true" ]; then
           sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/g' $DEFCONFIG
           sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/g' $DEFCONFIG
@@ -108,10 +109,8 @@ jobs:
           sed -i 's/# CONFIG_KALLSYMS_BASE_RELATIVE is not set/CONFIG_KALLSYMS_BASE_RELATIVE=y/g' $DEFCONFIG
         fi
 
-        # ---- 其他常用开关 ----
         sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/g' $DEFCONFIG
 
-        # ---- 关闭 LTO（GCC 编译不支持，必须关）----
         sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/g' $DEFCONFIG
         sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/g' $DEFCONFIG
         sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/g' $DEFCONFIG
@@ -123,30 +122,33 @@ jobs:
       run: |
         cd $KERNEL_DIR
 
-        # 1. 生成默认配置
-        make O=out ARCH=${KERNEL_ARCH} \
+        # Clang 全家桶 + GNU 交叉前缀（MTK 4.14 标准编译姿势）
+        MAKE_FLAGS="CC=clang \
+          LD=ld.lld \
+          AR=llvm-ar \
+          NM=llvm-nm \
+          OBJCOPY=llvm-objcopy \
+          OBJDUMP=llvm-objdump \
+          STRIP=llvm-strip \
           CROSS_COMPILE=aarch64-linux-gnu- \
           CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          ${KERNEL_CONFIG}
+          CROSS_COMPILE_COMPAT=arm-linux-gnueabi- \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          LLVM=1"
 
-        # 2. olddefconfig 固化新选项（用默认值填充）
-        make O=out ARCH=${KERNEL_ARCH} \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          olddefconfig
+        # 1. 生成默认配置
+        make O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} ${KERNEL_CONFIG}
+
+        # 2. olddefconfig 固化新选项
+        make O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} olddefconfig
 
         echo "---- 实际生效的配置 ----"
         grep -E "CONFIG_(KPROBES|KALLSYMS_ALL|MODULES)=" out/.config || true
 
         # 3. 正式编译
-        # KCFLAGS="-fcommon"：修复 GCC 10+ 默认 -fno-common 导致的链接期
-        # multiple definition 错误
-        make -j$(nproc) \
-          O=out \
-          ARCH=${KERNEL_ARCH} \
-          CROSS_COMPILE=aarch64-linux-gnu- \
-          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
-          KCFLAGS="-fcommon"
+        # KCFLAGS="-fcommon"：clang 11+ 默认 -fno-common，
+        # 老 4.14 内核需要 -fcommon 避免 multiple definition
+        make -j$(nproc) O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} KCFLAGS="-fcommon"
 
     - name: Check kernel output files
       run: |
@@ -171,7 +173,6 @@ jobs:
         fi
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
 
-        # 拷贝内核镜像
         if [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb ]; then
           cp android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb AnyKernel3/
         elif [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz ]; then
