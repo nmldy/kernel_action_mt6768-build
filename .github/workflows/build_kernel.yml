@@ -28,7 +28,12 @@ jobs:
     - name: Setup kernel build environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
+        # 安装 gcc-9 作为 Host 编译器（老内核的救星）
+        sudo apt-get install -y gcc-9 g++-9 git ccache automake flex lzop bison gperf build-essential zip curl zlib1g-dev g++-multilib libxml2-utils bzip2 libbz2-dev libghc-bzlib-dev squashfs-tools pngcrush schedtool dpkg-dev liblz4-tool make optipng maven libssl-dev pwgen libswitch-perl policycoreutils minicom libxml-sax-base-perl libxml-simple-perl bc libc6-dev-i386 lib32ncurses5-dev libx11-dev lib32z-dev libgl1-mesa-dev xsltproc unzip device-tree-compiler python2 python3
+        
+        # 将默认的 Host gcc 切换为 gcc-9，彻底避开 gcc-11 的 -fno-common 坑
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 60 --slave /usr/bin/g++ g++ /usr/bin/g++-9
+        sudo update-alternatives --config gcc
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     - name: Download GCC Compilers
@@ -56,9 +61,6 @@ jobs:
         sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/g' $DEFCONFIG
         sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/g' $DEFCONFIG
 
-        sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.lex.c 2>/dev/null || true
-        sed -i 's/YYLTYPE yylloc;/extern YYLTYPE yylloc;/g' scripts/dtc/dtc-lexer.l 2>/dev/null || true
-
     - name: Build kernel
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace/android-kernel
@@ -67,16 +69,18 @@ jobs:
         export PATH=$GITHUB_WORKSPACE/kernel_workspace/gcc-32/bin:$PATH
         export CROSS_COMPILE=aarch64-linux-android-
         export CROSS_COMPILE_ARM32=arm-linux-androideabi-
-        export KCFLAGS=-fno-common
         
-        # 生成默认配置
-        make -j4 O=out ARCH=arm64 merlin_defconfig
+        # 双保险：强制给 Host 编译器（x86）加上 -fcommon 忽略变量重定义
+        HOST_FLAGS="-fcommon -Wno-error"
         
-        # 关键修复：自动填充依赖，防止配置过期报错
-        make -j4 O=out ARCH=arm64 olddefconfig
+        # 1. 生成默认配置
+        make -j4 O=out ARCH=arm64 HOSTCFLAGS="$HOST_FLAGS" merlin_defconfig
         
-        # 开始编译
-        make -j4 O=out ARCH=arm64
+        # 2. 修复配置
+        yes "" | make -j4 O=out ARCH=arm64 HOSTCFLAGS="$HOST_FLAGS" oldconfig
+        
+        # 3. 正式编译
+        make -j4 O=out ARCH=arm64 HOSTCFLAGS="$HOST_FLAGS"
 
     - name: Check a kernel output files
       run: |
