@@ -97,6 +97,15 @@ jobs:
         cd android-kernel
         echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
 
+    - name: Patch kernel source (fix i2c-mtk.c undeclared 'id')
+      run: |
+        cd $KERNEL_DIR
+        sed -i 's/if ((id == 1) || (id == 6) || (id == 8))/if ((i2c->id == 1) || (i2c->id == 6) || (i2c->id == 8))/' \
+          drivers/i2c/busses/i2c-mtk.c
+
+        # 确认补丁生效
+        grep -n "i2c->id == 1" drivers/i2c/busses/i2c-mtk.c
+
     - name: Modify Defconfig (KPROBES / KALLSYMS_ALL / LTO off)
       run: |
         cd $KERNEL_DIR
