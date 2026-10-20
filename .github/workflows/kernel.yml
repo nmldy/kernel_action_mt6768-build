@@ -1,0 +1,199 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      BUILD_KSU:
+        description: "编译 KernelSU/ReSukiSU（手动钩子）"
+        required: false
+        default: "false"
+        type: boolean
+
+env:
+  CONFIG_ENV: config.env
+
+jobs:
+  build:
+    name: Build Kernel by ${{ github.actor }}
+    runs-on: ubuntu-22.04
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Read config.env
+      id: cfg
+      run: |
+        set -a
+        source config.env
+        set +a
+
+        # 透传到后续步骤
+        echo "KERNEL_SOURCE=${KERNEL_SOURCE}" >> $GITHUB_ENV
+        echo "KERNEL_SOURCE_BRANCH=${KERNEL_SOURCE_BRANCH}" >> $GITHUB_ENV
+        echo "KERNEL_CONFIG=${KERNEL_CONFIG}" >> $GITHUB_ENV
+        echo "KERNEL_IMAGE_NAME=${KERNEL_IMAGE_NAME}" >> $GITHUB_ENV
+        echo "KERNEL_ARCH=${KERNEL_ARCH}" >> $GITHUB_ENV
+
+        echo "USE_CUSTOM_ANYKERNEL3=${USE_CUSTOM_ANYKERNEL3}" >> $GITHUB_ENV
+        echo "CUSTOM_ANYKERNEL3_SOURCE=${CUSTOM_ANYKERNEL3_SOURCE}" >> $GITHUB_ENV
+        echo "CUSTOM_ANYKERNEL3_BRANCH=${CUSTOM_ANYKERNEL3_BRANCH}" >> $GITHUB_ENV
+        echo "ADD_LOCALVERSION_TO_FILENAME=${ADD_LOCALVERSION_TO_FILENAME}" >> $GITHUB_ENV
+
+        # KSU：config.env 为准，允许 workflow_dispatch 手动覆盖
+        if [ -n "${{ github.event.inputs.BUILD_KSU }}" ] && [ "${{ github.event.inputs.BUILD_KSU }}" = "true" ]; then
+          echo "ENABLE_KERNELSU=true" >> $GITHUB_ENV
+        else
+          echo "ENABLE_KERNELSU=${ENABLE_KERNELSU}" >> $GITHUB_ENV
+        fi
+        echo "ADD_KPROBES_CONFIG=${ADD_KPROBES_CONFIG}" >> $GITHUB_ENV
+
+    - name: Free Disk Space
+      uses: jlumbroso/free-disk-space@main
+      with:
+        tool-cache: false
+        android: true
+        dotnet: true
+        haskell: true
+        large-packages: false
+        docker-images: true
+        swap-storage: false
+
+    - name: Set swap to 10G
+      uses: pierotofy/set-swap-space@master
+      with:
+        swap-size-gb: 10
+
+    - name: Install build dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc-aarch64-linux-gnu \
+          gcc-arm-linux-gnueabi \
+          build-essential bc bison flex \
+          libssl-dev libbz2-dev zlib1g-dev \
+          ccache zip curl unzip xz-utils \
+          liblz4-tool lzop \
+          device-tree-compiler \
+          python3 python-is-python3 \
+          git make
+        mkdir -p $GITHUB_WORKSPACE/kernel_workspace
+
+    - name: Setup ccache
+      if: env.ENABLE_CCACHE == 'true'
+      uses: hendrikmuhs/ccache-action@v1.2
+      with:
+        key: kernel-${{ env.KERNEL_CONFIG }}
+
+    - name: Download kernel source
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        git clone --recursive \
+          ${KERNEL_SOURCE} \
+          -b ${KERNEL_SOURCE_BRANCH} \
+          android-kernel --depth=1
+        cd android-kernel
+        echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
+
+    - name: Modify Defconfig (KPROBES / KALLSYMS_ALL / LTO off)
+      run: |
+        cd $KERNEL_DIR
+        DEFCONFIG=arch/arm64/configs/${KERNEL_CONFIG}
+
+        # ---- 开启 KPROBES / KALLSYMS_ALL（供 KernelSU 系使用）----
+        if [ "${ADD_KPROBES_CONFIG}" = "true" ]; then
+          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/g' $DEFCONFIG
+          sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/g' $DEFCONFIG
+          sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/g' $DEFCONFIG
+          sed -i 's/# CONFIG_KALLSYMS_BASE_RELATIVE is not set/CONFIG_KALLSYMS_BASE_RELATIVE=y/g' $DEFCONFIG
+        fi
+
+        # ---- 其他常用开关 ----
+        sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/g' $DEFCONFIG
+
+        # ---- 关闭 LTO（GCC 编译不支持，必须关）----
+        sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/g' $DEFCONFIG
+        sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/g' $DEFCONFIG
+        sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/g' $DEFCONFIG
+
+        echo "---- defconfig 修改后关键项 ----"
+        grep -E "CONFIG_(KPROBES|KALLSYMS|LTO)" $DEFCONFIG || true
+
+    - name: Build kernel
+      run: |
+        cd $KERNEL_DIR
+
+        # 1. 生成默认配置
+        make O=out ARCH=${KERNEL_ARCH} \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          ${KERNEL_CONFIG}
+
+        # 2. olddefconfig 固化新选项（用默认值填充）
+        make O=out ARCH=${KERNEL_ARCH} \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          olddefconfig
+
+        echo "---- 实际生效的配置 ----"
+        grep -E "CONFIG_(KPROBES|KALLSYMS_ALL|MODULES)=" out/.config || true
+
+        # 3. 正式编译
+        # KCFLAGS="-fcommon"：修复 GCC 10+ 默认 -fno-common 导致的链接期
+        # multiple definition 错误
+        make -j$(nproc) \
+          O=out \
+          ARCH=${KERNEL_ARCH} \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          KCFLAGS="-fcommon"
+
+    - name: Check kernel output files
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        if [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/${KERNEL_IMAGE_NAME} ]; then
+            echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
+            ls -lh android-kernel/out/arch/${KERNEL_ARCH}/boot/
+        else
+            echo "Kernel output file ${KERNEL_IMAGE_NAME} not found"
+            ls -lh android-kernel/out/arch/${KERNEL_ARCH}/boot/ 2>/dev/null || true
+            exit 1
+        fi
+
+    - name: Prepare AnyKernel3
+      if: env.CHECK_FILE_IS_OK == 'true'
+      run: |
+        cd $GITHUB_WORKSPACE/kernel_workspace
+        if [ "${USE_CUSTOM_ANYKERNEL3}" = "true" ]; then
+          git clone ${CUSTOM_ANYKERNEL3_SOURCE} -b ${CUSTOM_ANYKERNEL3_BRANCH} --depth=1 AnyKernel3
+        else
+          git clone https://github.com/osm0sis/AnyKernel3 --depth=1 AnyKernel3
+        fi
+        rm -rf AnyKernel3/.git* AnyKernel3/README.md
+
+        # 拷贝内核镜像
+        if [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb ]; then
+          cp android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb AnyKernel3/
+        elif [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz ]; then
+          cp android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz AnyKernel3/
+        elif [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image ]; then
+          cp android-kernel/out/arch/${KERNEL_ARCH}/boot/Image AnyKernel3/
+        fi
+
+        ls -lh AnyKernel3/
+
+    - name: Upload AnyKernel3
+      if: env.CHECK_FILE_IS_OK == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: AnyKernel3-merlin-${{ github.run_id }}
+        path: kernel_workspace/AnyKernel3/*
+        if-no-files-found: error
+
+    - name: Upload kernel image (backup)
+      if: env.CHECK_FILE_IS_OK == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel-image-${{ github.run_id }}
+        path: kernel_workspace/android-kernel/out/arch/${{ env.KERNEL_ARCH }}/boot/${{ env.KERNEL_IMAGE_NAME }}
+        if-no-files-found: ignore
