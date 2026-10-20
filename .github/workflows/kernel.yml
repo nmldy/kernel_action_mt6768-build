@@ -43,7 +43,8 @@ jobs:
         else
           echo "ENABLE_KERNELSU=${ENABLE_KERNELSU}" >> $GITHUB_ENV
         fi
-        echo "ADD_KPROBES_CONFIG=${ADD_KPROBES_CONFIG}" >> $GITHUB_ENV
+        # 改动1：强制开启 KPROBES 注入，不再看 config.env 的开关
+        echo "ADD_KPROBES_CONFIG=true" >> $GITHUB_ENV
 
     - name: Free Disk Space
       uses: jlumbroso/free-disk-space@main
@@ -83,7 +84,6 @@ jobs:
         wget -q https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master-kernel-build-2022/clang-r450784e.tar.gz
         tar -xzf clang-r450784e.tar.gz -C clang-r450784e
         rm -f clang-r450784e.tar.gz
-        # 加入 PATH，后续所有步骤都能用 clang / ld.lld
         echo "$GITHUB_WORKSPACE/kernel_workspace/clang/clang-r450784e/bin" >> $GITHUB_PATH
         $GITHUB_WORKSPACE/kernel_workspace/clang/clang-r450784e/bin/clang --version
 
@@ -102,36 +102,40 @@ jobs:
         cd $KERNEL_DIR
         sed -i 's/if ((id == 1) || (id == 6) || (id == 8))/if ((i2c->id == 1) || (i2c->id == 6) || (i2c->id == 8))/' \
           drivers/i2c/busses/i2c-mtk.c
-
-        # 确认补丁生效
         grep -n "i2c->id == 1" drivers/i2c/busses/i2c-mtk.c
 
-    - name: Modify Defconfig (KPROBES / KALLSYMS_ALL / LTO off)
+    - name: Modify Defconfig (强制注入 KPROBES / KALLSYMS_ALL)
       run: |
         cd $KERNEL_DIR
         DEFCONFIG=arch/arm64/configs/${KERNEL_CONFIG}
 
-        if [ "${ADD_KPROBES_CONFIG}" = "true" ]; then
-          sed -i 's/# CONFIG_KPROBES is not set/CONFIG_KPROBES=y/g' $DEFCONFIG
-          sed -i 's/# CONFIG_KPROBE_EVENTS is not set/CONFIG_KPROBE_EVENTS=y/g' $DEFCONFIG
-          sed -i 's/# CONFIG_KALLSYMS_ALL is not set/CONFIG_KALLSYMS_ALL=y/g' $DEFCONFIG
-          sed -i 's/# CONFIG_KALLSYMS_BASE_RELATIVE is not set/CONFIG_KALLSYMS_BASE_RELATIVE=y/g' $DEFCONFIG
-        fi
+        # 改动2：先删旧行，再强制追加，不管 defconfig 原来什么格式都能写入
+        sed -i '/CONFIG_KPROBES/d' $DEFCONFIG
+        sed -i '/CONFIG_KPROBE_EVENTS/d' $DEFCONFIG
+        sed -i '/CONFIG_KALLSYMS_ALL/d' $DEFCONFIG
+        sed -i '/CONFIG_KALLSYMS_BASE_RELATIVE/d' $DEFCONFIG
+        sed -i '/CONFIG_MODULES/d' $DEFCONFIG
 
-        sed -i 's/# CONFIG_MODULES is not set/CONFIG_MODULES=y/g' $DEFCONFIG
+        cat >> $DEFCONFIG << 'EOF'
+        CONFIG_MODULES=y
+        CONFIG_KPROBES=y
+        CONFIG_KPROBE_EVENTS=y
+        CONFIG_KALLSYMS_ALL=y
+        CONFIG_KALLSYMS_BASE_RELATIVE=y
+        EOF
 
+        # 关 LTO，避免符号裁剪影响 KPROBES
         sed -i 's/CONFIG_LTO=y/CONFIG_LTO=n/g' $DEFCONFIG
         sed -i 's/CONFIG_LTO_CLANG=y/CONFIG_LTO_CLANG=n/g' $DEFCONFIG
         sed -i 's/CONFIG_THINLTO=y/CONFIG_THINLTO=n/g' $DEFCONFIG
 
         echo "---- defconfig 修改后关键项 ----"
-        grep -E "CONFIG_(KPROBES|KALLSYMS|LTO)" $DEFCONFIG || true
+        grep -E "CONFIG_(KPROBES|KALLSYMS|MODULES|LTO)" $DEFCONFIG || true
 
     - name: Build kernel
       run: |
         cd $KERNEL_DIR
 
-        # Clang 全家桶 + GNU 交叉前缀（MTK 4.14 标准编译姿势）
         MAKE_FLAGS="CC=clang \
           LD=ld.lld \
           AR=llvm-ar \
@@ -151,12 +155,19 @@ jobs:
         # 2. olddefconfig 固化新选项
         make O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} olddefconfig
 
-        echo "---- 实际生效的配置 ----"
+        # 改动3：硬性检查，配置没生效就报错停止，不产出废内核
+        echo "---- out/.config 实际生效项 ----"
         grep -E "CONFIG_(KPROBES|KALLSYMS_ALL|MODULES)=" out/.config || true
+        if ! grep -q "^CONFIG_KPROBES=y" out/.config; then
+          echo "::error::CONFIG_KPROBES 没有生效，停止构建"
+          exit 1
+        fi
+        if ! grep -q "^CONFIG_KALLSYMS_ALL=y" out/.config; then
+          echo "::error::CONFIG_KALLSYMS_ALL 没有生效，停止构建"
+          exit 1
+        fi
 
         # 3. 正式编译
-        # KCFLAGS="-fcommon"：clang 11+ 默认 -fno-common，
-        # 老 4.14 内核需要 -fcommon 避免 multiple definition
         make -j$(nproc) O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} KCFLAGS="-fcommon"
 
     - name: Check kernel output files
