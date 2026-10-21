@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       BUILD_KSU:
-        description: "编译 SukiSU（内核集成模式）"
+        description: "编译 SukiSU(内核集成模式)"
         required: false
         default: "true"
         type: boolean
@@ -97,11 +97,13 @@ jobs:
         cd android-kernel
         echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
 
-    - name: Integrate SukiSU-Ultra (builtin, non-GKI)
+    - name: Integrate SukiSU-Ultra (main branch, kprobes hook, non-GKI compatible)
       if: env.ENABLE_KERNELSU == 'true'
       run: |
         cd $KERNEL_DIR
-        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s builtin
+        # 必须用 main 分支（KPROBES Hook）
+        # builtin 分支的 SUSFS_INLINE_HOOK 依赖 linux/static_call.h（仅 5.10+ 有），4.14 必炸
+        curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
         # 确认集成成功
         ls -la drivers/kernelsu/ | head -20
         grep -n "kernelsu" drivers/Makefile
