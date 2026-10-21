@@ -111,8 +111,7 @@ jobs:
         sed -i 's|^MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);|/* removed for 4.14 compat */|' \
           drivers/kernelsu/core/init.c
         if grep -q "^MODULE_IMPORT_NS" drivers/kernelsu/core/init.c; then
-          echo "::warning::MODULE_IMPORT_NS 补丁未命中，检查 init.c 内容"
-          head -5 drivers/kernelsu/core/init.c
+          echo "::warning::MODULE_IMPORT_NS 补丁未命中"
         else
           echo "OK: MODULE_IMPORT_NS removed"
         fi
@@ -122,10 +121,19 @@ jobs:
         sed -i 's|^extern syscall_fn_t \*ksu_syscall_table;|#ifndef __KSU_SYSCALL_FN_T_COMPAT\n#define __KSU_SYSCALL_FN_T_COMPAT\ntypedef long (*syscall_fn_t)(long, long, long, long, long, long);\n#endif\nextern syscall_fn_t *ksu_syscall_table;|' \
           drivers/kernelsu/hook/syscall_hook.h
         if ! grep -q "__KSU_SYSCALL_FN_T_COMPAT" drivers/kernelsu/hook/syscall_hook.h; then
-          echo "::warning::syscall_fn_t 补丁未命中，打印文件头部用于排查"
+          echo "::warning::syscall_fn_t 补丁未命中"
           head -50 drivers/kernelsu/hook/syscall_hook.h
         else
           echo "OK: syscall_fn_t compat typedef injected"
+        fi
+
+        # 补丁3：linux/pgtable.h 是 5.8+ 才有的头文件，4.14 用 asm/pgtable.h
+        # 全目录替换，防止其他文件也引用
+        if grep -rl "linux/pgtable.h" drivers/kernelsu/ >/dev/null 2>&1; then
+          grep -rl "linux/pgtable.h" drivers/kernelsu/ | xargs sed -i 's|#include <linux/pgtable.h>|#include <asm/pgtable.h>|'
+          echo "OK: linux/pgtable.h -> asm/pgtable.h (files: $(grep -rl "asm/pgtable.h" drivers/kernelsu/ | tr '\n' ' '))"
+        else
+          echo "OK: no linux/pgtable.h found (already clean)"
         fi
 
         # 集成确认
