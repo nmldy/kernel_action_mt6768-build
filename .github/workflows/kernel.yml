@@ -97,14 +97,38 @@ jobs:
         cd android-kernel
         echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
 
-    - name: Integrate SukiSU-Ultra (main branch, kprobes hook, non-GKI compatible)
+    - name: Integrate SukiSU-Ultra (main branch + 4.14 non-GKI compat patches)
       if: env.ENABLE_KERNELSU == 'true'
       run: |
         cd $KERNEL_DIR
-        # 必须用 main 分支（KPROBES Hook）
+        # main 分支（KPROBES Hook）
         # builtin 分支的 SUSFS_INLINE_HOOK 依赖 linux/static_call.h（仅 5.10+ 有），4.14 必炸
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s main
-        # 确认集成成功
+
+        # ===== 兼容补丁：4.14 Non-GKI =====
+
+        # 补丁1：删除 MODULE_IMPORT_NS（5.3+ 才有的宏，4.14 无定义；对内置驱动无用，删掉无害）
+        sed -i 's|^MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);|/* removed for 4.14 compat */|' \
+          drivers/kernelsu/core/init.c
+        if grep -q "^MODULE_IMPORT_NS" drivers/kernelsu/core/init.c; then
+          echo "::warning::MODULE_IMPORT_NS 补丁未命中，检查 init.c 内容"
+          head -5 drivers/kernelsu/core/init.c
+        else
+          echo "OK: MODULE_IMPORT_NS removed"
+        fi
+
+        # 补丁2：注入 syscall_fn_t 兼容 typedef（4.14 无 syscall wrapper，
+        # arm64 系统调用 x0~x5 传参，6参通用函数指针 ABI 兼容）
+        sed -i 's|^extern syscall_fn_t \*ksu_syscall_table;|#ifndef __KSU_SYSCALL_FN_T_COMPAT\n#define __KSU_SYSCALL_FN_T_COMPAT\ntypedef long (*syscall_fn_t)(long, long, long, long, long, long);\n#endif\nextern syscall_fn_t *ksu_syscall_table;|' \
+          drivers/kernelsu/hook/syscall_hook.h
+        if ! grep -q "__KSU_SYSCALL_FN_T_COMPAT" drivers/kernelsu/hook/syscall_hook.h; then
+          echo "::warning::syscall_fn_t 补丁未命中，打印文件头部用于排查"
+          head -50 drivers/kernelsu/hook/syscall_hook.h
+        else
+          echo "OK: syscall_fn_t compat typedef injected"
+        fi
+
+        # 集成确认
         ls -la drivers/kernelsu/ | head -20
         grep -n "kernelsu" drivers/Makefile
         grep -n "kernelsu" drivers/Kconfig
