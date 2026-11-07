@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       BUILD_APATCH:
-        description: "编译 APatch 支持的内核（仅启用 KALLSYMS，不集成任何 Root 方案）"
+        description: "编译 APatch 支持的内核（仅启用 KALLSYMS）"
         required: false
         default: "true"
         type: boolean
@@ -27,18 +27,14 @@ jobs:
         set -a
         source config.env
         set +a
-
         echo "KERNEL_SOURCE=${KERNEL_SOURCE}" >> $GITHUB_ENV
         echo "KERNEL_SOURCE_BRANCH=${KERNEL_SOURCE_BRANCH}" >> $GITHUB_ENV
         echo "KERNEL_CONFIG=${KERNEL_CONFIG}" >> $GITHUB_ENV
         echo "KERNEL_IMAGE_NAME=${KERNEL_IMAGE_NAME}" >> $GITHUB_ENV
         echo "KERNEL_ARCH=${KERNEL_ARCH}" >> $GITHUB_ENV
-
         echo "USE_CUSTOM_ANYKERNEL3=${USE_CUSTOM_ANYKERNEL3}" >> $GITHUB_ENV
         echo "CUSTOM_ANYKERNEL3_SOURCE=${CUSTOM_ANYKERNEL3_SOURCE}" >> $GITHUB_ENV
         echo "CUSTOM_ANYKERNEL3_BRANCH=${CUSTOM_ANYKERNEL3_BRANCH}" >> $GITHUB_ENV
-
-        # APatch 编译流程不需要 CONFIG_KSU，但必须保证 KALLSYMS_ALL
         echo "ADD_KPROBES_CONFIG=true" >> $GITHUB_ENV
 
     - name: Free Disk Space
@@ -60,16 +56,7 @@ jobs:
     - name: Install build dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          gcc-aarch64-linux-gnu \
-          gcc-arm-linux-gnueabi \
-          build-essential bc bison flex \
-          libssl-dev libbz2-dev zlib1g-dev \
-          ccache zip curl unzip xz-utils \
-          liblz4-tool lzop \
-          device-tree-compiler \
-          python3 python-is-python3 \
-          git make
+        sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi build-essential bc bison flex libssl-dev libbz2-dev zlib1g-dev ccache zip curl unzip xz-utils liblz4-tool lzop device-tree-compiler python3 python-is-python3 git make
         mkdir -p $GITHUB_WORKSPACE/kernel_workspace
 
     - name: Download AOSP Clang (r450784e)
@@ -85,81 +72,62 @@ jobs:
     - name: Download kernel source
       run: |
         cd $GITHUB_WORKSPACE/kernel_workspace
-        git clone --recursive \
-          ${KERNEL_SOURCE} \
-          -b ${KERNEL_SOURCE_BRANCH} \
-          android-kernel --depth=1
+        git clone --recursive ${KERNEL_SOURCE} -b ${KERNEL_SOURCE_BRANCH} android-kernel --depth=1
         cd android-kernel
         echo "KERNEL_DIR=$(pwd)" >> $GITHUB_ENV
 
-    - name: Patch kernel source (fix i2c-mtk.c undeclared 'id')
+    - name: Patch kernel source (fix i2c-mtk)
       run: |
         cd $KERNEL_DIR
-        sed -i 's/if ((id == 1) || (id == 6) || (id == 8))/if ((i2c->id == 1) || (i2c->id == 6) || (i2c->id == 8))/' \
-          drivers/i2c/busses/i2c-mtk.c
+        sed -i 's/if ((id == 1) || (id == 6) || (id == 8))/if ((i2c->id == 1) || (i2c->id == 6) || (i2c->id == 8))/' drivers/i2c/busses/i2c-mtk.c
         grep -n "i2c->id == 1" drivers/i2c/busses/i2c-mtk.c
 
-    - name: Modify Defconfig (APatch: KALLSYMS_ALL only, no KSU)
+    - name: Modify Defconfig (APatch Support)
       run: |
         cd $KERNEL_DIR
         DEFCONFIG=arch/arm64/configs/${KERNEL_CONFIG}
-
-        # 移除所有 KSU / LTO 旧行
+        
         sed -i '/CONFIG_KSU/d' $DEFCONFIG
         sed -i '/CONFIG_KALLSYMS_ALL/d' $DEFCONFIG
         sed -i '/CONFIG_KALLSYMS_BASE_RELATIVE/d' $DEFCONFIG
         sed -i '/CONFIG_LTO/d' $DEFCONFIG
         sed -i '/CONFIG_LTO_CLANG/d' $DEFCONFIG
         sed -i '/CONFIG_THINLTO/d' $DEFCONFIG
-
-        # 使用 echo 逐行写入，避免 Heredoc 缩进导致 YAML 解析失败
+        
         echo "CONFIG_KALLSYMS=y" >> $DEFCONFIG
         echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
         echo "CONFIG_KALLSYMS_BASE_RELATIVE=y" >> $DEFCONFIG
         echo "# CONFIG_LTO is not set" >> $DEFCONFIG
         echo "# CONFIG_LTO_CLANG is not set" >> $DEFCONFIG
         echo "# CONFIG_THINLTO is not set" >> $DEFCONFIG
-
-        echo "---- defconfig 修改后关键项 ----"
+        
+        echo "---- defconfig check ----"
         grep -E "CONFIG_(KALLSYMS|KSU|LTO)" $DEFCONFIG || true
 
     - name: Build kernel
       run: |
         cd $KERNEL_DIR
-
-        MAKE_FLAGS="CC=clang \
-          LD=ld.lld \
-          AR=llvm-ar \
-          NM=llvm-nm \
-          OBJCOPY=llvm-objcopy \
-          OBJDUMP=llvm-objdump \
-          STRIP=llvm-strip \
-          CLANG_TRIPLE=aarch64-linux-gnu- \
-          LLVM=1"
-
-        # 1. 生成默认配置
+        MAKE_FLAGS="CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip CLANG_TRIPLE=aarch64-linux-gnu- LLVM=1"
+        
         make O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} ${KERNEL_CONFIG}
-
-        # 2. olddefconfig 固化新选项
         make O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} olddefconfig
-
-        # 硬性检查：APatch 必需
-        echo "---- out/.config 实际生效项 ----"
+        
+        echo "---- out/.config actual config ----"
         grep -E "CONFIG_(KALLSYMS|KALLSYMS_ALL|KSU)=" out/.config || true
+        
         if ! grep -q "^CONFIG_KALLSYMS=y" out/.config; then
-          echo "::error::CONFIG_KALLSYMS 没有生效，APatch 无法工作"
+          echo "::error::CONFIG_KALLSYMS missing"
           exit 1
         fi
         if ! grep -q "^CONFIG_KALLSYMS_ALL=y" out/.config; then
-          echo "::error::CONFIG_KALLSYMS_ALL 没有生效，APatch 将仅处于“初步支持”状态，建议开启"
+          echo "::error::CONFIG_KALLSYMS_ALL missing"
           exit 1
         fi
         if grep -q "^CONFIG_KSU=y" out/.config; then
-          echo "::error::CONFIG_KSU 仍然存在，APatch 与 KernelSU 不能共存，停止构建"
+          echo "::error::CONFIG_KSU exists! Stop building."
           exit 1
         fi
-
-        # 3. 正式编译
+        
         make -j$(nproc) O=out ARCH=${KERNEL_ARCH} ${MAKE_FLAGS} KCFLAGS="-fcommon"
 
     - name: Check kernel output files
@@ -169,8 +137,7 @@ jobs:
             echo "CHECK_FILE_IS_OK=true" >> $GITHUB_ENV
             ls -lh android-kernel/out/arch/${KERNEL_ARCH}/boot/
         else
-            echo "Kernel output file ${KERNEL_IMAGE_NAME} not found"
-            ls -lh android-kernel/out/arch/${KERNEL_ARCH}/boot/ 2>/dev/null || true
+            echo "Kernel output not found!"
             exit 1
         fi
 
@@ -181,11 +148,10 @@ jobs:
         if [ "${USE_CUSTOM_ANYKERNEL3}" = "true" ] && [ -n "${CUSTOM_ANYKERNEL3_SOURCE}" ]; then
           git clone ${CUSTOM_ANYKERNEL3_SOURCE} -b ${CUSTOM_ANYKERNEL3_BRANCH} --depth=1 AnyKernel3
         else
-          # APatch 并不强制特定 AnyKernel3 分支，使用 osm0sis 默认分支即可
           git clone https://github.com/osm0sis/AnyKernel3 --depth=1 AnyKernel3
         fi
         rm -rf AnyKernel3/.git* AnyKernel3/README.md
-
+        
         if [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb ]; then
           cp android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz-dtb AnyKernel3/
         elif [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image.gz ]; then
@@ -193,7 +159,6 @@ jobs:
         elif [ -f android-kernel/out/arch/${KERNEL_ARCH}/boot/Image ]; then
           cp android-kernel/out/arch/${KERNEL_ARCH}/boot/Image AnyKernel3/
         fi
-
         ls -lh AnyKernel3/
 
     - name: Upload AnyKernel3
