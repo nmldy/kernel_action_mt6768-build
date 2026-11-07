@@ -112,15 +112,13 @@ jobs:
         sed -i '/CONFIG_LTO_CLANG/d' $DEFCONFIG
         sed -i '/CONFIG_THINLTO/d' $DEFCONFIG
 
-        # APatch 只需要 KALLSYMS_ALL=y（KALLSYMS 通常已默认开启，这里也显式补上）
-        cat >> $DEFCONFIG << 'EOF'
-        CONFIG_KALLSYMS=y
-        CONFIG_KALLSYMS_ALL=y
-        CONFIG_KALLSYMS_BASE_RELATIVE=y
-        # CONFIG_LTO is not set
-        # CONFIG_LTO_CLANG is not set
-        # CONFIG_THINLTO is not set
-        EOF
+        # 使用 echo 逐行写入，避免 Heredoc 缩进导致 YAML 解析失败
+        echo "CONFIG_KALLSYMS=y" >> $DEFCONFIG
+        echo "CONFIG_KALLSYMS_ALL=y" >> $DEFCONFIG
+        echo "CONFIG_KALLSYMS_BASE_RELATIVE=y" >> $DEFCONFIG
+        echo "# CONFIG_LTO is not set" >> $DEFCONFIG
+        echo "# CONFIG_LTO_CLANG is not set" >> $DEFCONFIG
+        echo "# CONFIG_THINLTO is not set" >> $DEFCONFIG
 
         echo "---- defconfig 修改后关键项 ----"
         grep -E "CONFIG_(KALLSYMS|KSU|LTO)" $DEFCONFIG || true
